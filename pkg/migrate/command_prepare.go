@@ -50,6 +50,7 @@ func NewPrepareCommand(streams genericiooptions.IOStreams) *PrepareCommand {
 	registry.MustRegister(&modelserving.ModelMeshToRawAction{})
 	registry.MustRegister(&modelserving.HardwareProfilesIgnorelistAction{})
 	registry.MustRegister(&modelserving.AddOwnerReferencesAction{})
+	registry.MustRegister(&modelserving.ManagedISVCConfigAction{})
 
 	return &PrepareCommand{
 		SharedOptions: shared,

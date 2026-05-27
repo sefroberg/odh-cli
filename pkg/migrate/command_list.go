@@ -55,6 +55,7 @@ func NewListCommand(streams genericiooptions.IOStreams) *ListCommand {
 	registry.MustRegister(&modelserving.ModelMeshToRawAction{})
 	registry.MustRegister(&modelserving.HardwareProfilesIgnorelistAction{})
 	registry.MustRegister(&modelserving.AddOwnerReferencesAction{})
+	registry.MustRegister(&modelserving.ManagedISVCConfigAction{})
 
 	return &ListCommand{
 		SharedOptions: shared,
