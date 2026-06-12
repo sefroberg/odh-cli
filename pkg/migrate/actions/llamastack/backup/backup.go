@@ -32,7 +32,6 @@ const (
 
 	podDataPath = "/opt/app-root/src/.llama/distributions/rh"
 
-	msgErrNotRootRecorder    = "recorder is not a RootRecorder"
 	msgErrCreateBackupDir    = "Failed to create backup directory: %v"
 	msgErrListDistributions  = "Failed to list LlamaStackDistributions: %v"
 	msgErrCreateLLSDDir      = "Failed to create directory: %v"
@@ -83,8 +82,13 @@ func (a *LlamaStackBackupAction) Description() string       { return actionDescr
 func (a *LlamaStackBackupAction) Group() action.ActionGroup { return action.GroupBackup }
 func (a *LlamaStackBackupAction) Phase() action.ActionPhase { return action.PhasePreUpgrade }
 
-func (a *LlamaStackBackupAction) CanApply(_ action.Target) bool {
-	return true
+func (a *LlamaStackBackupAction) CanApply(target action.Target) bool {
+	if target.TargetVersion == nil {
+		return false
+	}
+
+	// LlamaStack→OGX rename lands in 3.5; after that the CRDs no longer exist.
+	return target.TargetVersion.Major == 3 && target.TargetVersion.Minor <= 5
 }
 
 func (a *LlamaStackBackupAction) Prepare() action.Task {
@@ -100,20 +104,10 @@ type prepareTask struct {
 }
 
 func (t *prepareTask) Validate(_ context.Context, target action.Target) (*result.ActionResult, error) {
-	rootRecorder, ok := target.Recorder.(action.RootRecorder)
-	if !ok {
-		return nil, errors.New(msgErrNotRootRecorder)
-	}
-
-	return rootRecorder.Build(), nil
+	return action.BuildResult(target)
 }
 
 func (t *prepareTask) Execute(ctx context.Context, target action.Target) (*result.ActionResult, error) {
-	rootRecorder, ok := target.Recorder.(action.RootRecorder)
-	if !ok {
-		return nil, errors.New(msgErrNotRootRecorder)
-	}
-
 	step := target.Recorder.Child("llamastack-backup", msgStepBackupAll)
 
 	// Create main backup directory
@@ -121,7 +115,7 @@ func (t *prepareTask) Execute(ctx context.Context, target action.Target) (*resul
 		if err := os.MkdirAll(target.OutputDir, dirPerms); err != nil {
 			step.Completef(result.StepFailed, msgErrCreateBackupDir, err)
 
-			return rootRecorder.Build(), nil
+			return action.BuildResult(target)
 		}
 	}
 
@@ -130,17 +124,17 @@ func (t *prepareTask) Execute(ctx context.Context, target action.Target) (*resul
 		if client.IsResourceTypeNotFound(err) {
 			step.Completef(result.StepCompleted, msgInfoNoCRDPresent)
 
-			return rootRecorder.Build(), nil
+			return action.BuildResult(target)
 		}
 		step.Completef(result.StepFailed, msgErrListDistributions, err)
 
-		return rootRecorder.Build(), nil
+		return action.BuildResult(target)
 	}
 
 	if len(llsdList.Items) == 0 {
 		step.Completef(result.StepCompleted, msgInfoNoResourcesFound)
 
-		return rootRecorder.Build(), nil
+		return action.BuildResult(target)
 	}
 
 	target.IO.Errorf(msgPreRenameNotice)
@@ -167,7 +161,7 @@ func (t *prepareTask) Execute(ctx context.Context, target action.Target) (*resul
 
 	step.Completef(result.StepCompleted, msgInfoBackedUpCount, len(llsdList.Items))
 
-	return rootRecorder.Build(), nil
+	return action.BuildResult(target)
 }
 
 //nolint:nonamedreturns // named returns clarify the two-purpose return value
@@ -193,6 +187,10 @@ func processLLSD(ctx context.Context, target action.Target, llsd unstructured.Un
 		}
 	}
 
+	// ConfigMap and pod data backups are independent; attempt both even if one
+	// fails so we capture as much data as possible. Individual failures are
+	// recorded immediately via child steps and the parent step is marked failed
+	// after both have been attempted.
 	failed := false
 
 	// 2. ConfigMap

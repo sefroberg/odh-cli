@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/blang/semver/v4"
 	"github.com/onsi/gomega/gstruct"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -222,9 +223,30 @@ func TestLlamaStackBackupAction_Execute(t *testing.T) {
 		g := NewWithT(t)
 		ctx := t.Context()
 
-		// Place the terminating pod before the ready pod to verify selectReadyPod
-		// skips the non-Ready pod instead of blindly taking the first list item.
-		dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind, llsd, cm, podTerminating, pod, deploy)
+		// Use per-test pod fixtures so wrong selection becomes observable.
+		// The terminating pod's ownerReference points to a ReplicaSet whose
+		// inferred deployment ("wrong-deploy") does not exist. If selectReadyPod
+		// picks this pod, backupDeploymentForPod will look up "wrong-deploy"
+		// instead of "test-deploy".
+		terminatingPod := podTerminating.DeepCopy()
+		terminatingPod.Object["metadata"].(map[string]any)["ownerReferences"] = []any{
+			map[string]any{"kind": "ReplicaSet", "name": "wrong-deploy-oldhash"},
+		}
+		readyPod := pod.DeepCopy()
+
+		dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind, llsd, cm, terminatingPod, readyPod, deploy)
+
+		// Track which deployment names are looked up to verify pod selection.
+		var requestedDeployments []string
+		dynamicClient.PrependReactor("get", "deployments", func(a clienttesting.Action) (bool, runtime.Object, error) {
+			getAction, ok := a.(clienttesting.GetAction)
+			if ok {
+				requestedDeployments = append(requestedDeployments, getAction.GetName())
+			}
+
+			return false, nil, nil // fall through to default behavior
+		})
+
 		testClient := client.NewForTesting(client.TestClientConfig{
 			Dynamic: dynamicClient,
 		})
@@ -254,6 +276,12 @@ func TestLlamaStackBackupAction_Execute(t *testing.T) {
 				"Completed": BeTrue(),
 			}),
 		})))
+		g.Expect(hasFailedStep(res, stepNameBackup, stepNameBackupLLSD)).To(BeFalse(),
+			"ready pod should be selected; selecting terminating pod would look up wrong-deploy")
+		g.Expect(requestedDeployments).To(ContainElement("test-deploy"),
+			"should look up deployment for the ready pod")
+		g.Expect(requestedDeployments).NotTo(ContainElement("wrong-deploy"),
+			"should not look up deployment for the terminating pod")
 	})
 
 	t.Run("successfully backs up resources to disk (non-dry-run)", func(t *testing.T) {
@@ -588,4 +616,40 @@ func TestEnforcePermissions_SkipsSymlinks(t *testing.T) {
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(afterInfo.Mode().Perm()).To(Equal(originalMode),
 		"enforcePermissions must not chmod through symlinks")
+}
+
+func TestLlamaStackBackupAction_CanApply(t *testing.T) {
+	v30 := semver.MustParse("3.0.0")
+	v34 := semver.MustParse("3.4.0")
+	v35 := semver.MustParse("3.5.0")
+	v36 := semver.MustParse("3.6.0")
+	v40 := semver.MustParse("4.0.0")
+	v225 := semver.MustParse("2.25.0")
+
+	tests := []struct {
+		name          string
+		targetVersion *semver.Version
+		expected      bool
+	}{
+		{"applies for target 3.0", &v30, true},
+		{"applies for target 3.4", &v34, true},
+		{"applies for target 3.5", &v35, true},
+		{"does not apply for target 3.6", &v36, false},
+		{"does not apply for target 4.0", &v40, false},
+		{"does not apply for target 2.25", &v225, false},
+		{"does not apply for nil target version", nil, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			a := &backup.LlamaStackBackupAction{}
+			target := action.Target{
+				TargetVersion: tt.targetVersion,
+			}
+
+			g.Expect(a.CanApply(target)).To(Equal(tt.expected))
+		})
+	}
 }
